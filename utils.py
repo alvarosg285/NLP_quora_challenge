@@ -18,7 +18,7 @@ def get_features_from_df(df, count_vectorizer):
     """
     q1_casted =  cast_list_as_strings(list(df["question1"]))
     q2_casted =  cast_list_as_strings(list(df["question2"]))
-    
+
     ############### Begin exercise ###################
     # what is kaggle                  q1
     # What is the kaggle platform     q2
