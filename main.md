@@ -103,8 +103,8 @@ Name_Surname.zip
 
 ```bash
 # 1. Create environment
-conda env create -f environment.yml --name quora_test_env
-conda activate quora_test_env
+conda env create -f environment.yml --name quora_challenge_env
+conda activate quora_challenge_env
 
 # 2. Train (only needed once — safe to re-run, skips existing files)
 jupyter nbconvert --to notebook --execute train_models.ipynb
