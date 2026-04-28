@@ -1,0 +1,114 @@
+# NLP Deliverable 1 — Quora Question Pairs
+
+## 1. Objective
+
+Build a binary classifier that determines whether two questions on Quora are
+semantically equivalent (duplicates).  We present a **baseline** model and an
+**improved** model, then compare them across train / validation / test splits.
+
+Dataset: [Quora Question Pairs — Kaggle](https://www.kaggle.com/c/quora-question-pairs/overview)
+
+---
+
+## 2. Work distribution
+
+| Member | Responsibility |
+|--------|---------------|
+| Classmate | Baseline pipeline: `cast_list_as_strings`, `get_features_from_df`, `get_mistakes`, initial `train_models.ipynb` cells |
+| Student | All `# ADDED` functions in `utils.py`; extended `train_models.ipynb`; `reproduce_results.ipynb`; `utils_student.ipynb`; this document |
+
+---
+
+## 3. Approach
+
+### 3.1 Baseline
+
+| Component | Choice |
+|-----------|--------|
+| Tokenisation | Whitespace split, NaN → string `"nan"` |
+| Representation | `CountVectorizer` (unigrams), q1 and q2 concatenated |
+| Classifier | `LogisticRegression(solver="liblinear", random_state=123)` |
+
+### 3.2 Limitations of the Baseline
+
+- **No semantic similarity**: synonyms ("car" / "automobile") score zero overlap.
+- **Word order ignored**: BoW cannot distinguish "A beats B" from "B beats A".
+- **No cross-question signal**: the model never explicitly sees what q1 and q2 *share*.
+- **Stopword noise**: high-frequency words ("what", "is") carry as much weight as content words.
+- **High dimensionality / sparsity**: >100 k features, most zero.
+
+### 3.3 Improved Model
+
+We keep the BoW representation and add five handcrafted features that
+directly encode the *relationship* between q1 and q2.
+
+| # | Feature | Formula | Implementation |
+|---|---------|---------|---------------|
+| 0 | Jaccard similarity | $|A\cap B|/|A\cup B|$ | from scratch (Python sets) |
+| 1 | Length ratio | $\min(l_1,l_2)/\max(l_1,l_2)$ | from scratch |
+| 2 | Common-word F1 | $2|A\cap B|/(|A|+|B|)$ | from scratch |
+| 3 | Char-bigram Dice coefficient | $2|bg_1\cap bg_2|/(|bg_1|+|bg_2|)$ | from scratch (`Counter`) |
+| 4 | TF-IDF cosine similarity | $\mathbf{u}\cdot\mathbf{v}/(||\mathbf{u}||\,||\mathbf{v}||)$ | from scratch (sparse ops) |
+
+A `TfidfVectorizer(ngram_range=(1,1), min_df=3, sublinear_tf=True)` is fitted
+on training questions only (no leakage) to supply the IDF weights for feature 4.
+
+The improved classifier is `LogisticRegression(solver="liblinear", random_state=123)`
+trained on the concatenation `[X_BoW | X_handcrafted]`.
+
+Additionally, `lcs_ratio` (word-level Longest Common Subsequence) is implemented
+from scratch in `utils.py` and demonstrated in `utils_student.ipynb`; due to its
+O(m·n) per-pair complexity it is not used in the full-dataset pipeline.
+
+---
+
+## 4. Results
+
+*(Populated after running `reproduce_results.ipynb`)*
+
+| model | split | roc_auc | precision | recall | f1 |
+|-------|-------|---------|-----------|--------|----|
+| baseline | train | — | — | — | — |
+| baseline | val | — | — | — | — |
+| baseline | test | — | — | — | — |
+| improved | train | — | — | — | — |
+| improved | val | — | — | — | — |
+| improved | test | — | — | — | — |
+
+---
+
+## 5. Repository structure
+
+```
+Name_Surname.zip
+├── main.pdf              ← this document
+├── environment.yml       ← conda environment (Python 3.9)
+├── utils.py              ← shared utility functions
+├── train_models.ipynb    ← trains and saves models to models/
+├── reproduce_results.ipynb ← loads models, evaluates, displays metrics
+├── utils_student.ipynb   ← explanation + demos of added utils functions
+└── models/               ← created by train_models.ipynb
+    ├── count_vectorizer.pkl
+    ├── tfidf_vectorizer.pkl
+    ├── baseline_logistic.pkl
+    └── improved_logistic.pkl
+```
+
+> **Data path:** `~/Datasets/QuoraQuestionPairs/quora_data.csv`  
+> The data directory is **not** included in the zip.
+
+---
+
+## 6. How to reproduce
+
+```bash
+# 1. Create environment
+conda env create -f environment.yml --name quora_challenge_env
+conda activate quora_challenge_env
+
+# 2. Train (only needed once — safe to re-run, skips existing files)
+jupyter nbconvert --to notebook --execute train_models.ipynb
+
+# 3. Evaluate
+jupyter nbconvert --to notebook --execute reproduce_results.ipynb
+```
