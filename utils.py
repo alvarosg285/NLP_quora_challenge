@@ -56,6 +56,13 @@ def get_mistakes(clf, X_q1q2, y):
     else:
         return incorrect_indices, predictions
 
+def print_mistake_k(k, df, mistake_indices, predictions):
+    print(df.iloc[mistake_indices[k]].question1)
+    print(df.iloc[mistake_indices[k]].question2)
+    print("true class:", df.iloc[mistake_indices[k]].is_duplicate)
+    print("prediction:", predictions[mistake_indices[k]])
+    print()
+
 # ADDED ─────────────────────────────────────────────────────────────────────
 # Extra imports required by the added functions
 import pickle          # ADDED
