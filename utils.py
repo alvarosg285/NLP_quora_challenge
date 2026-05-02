@@ -12,37 +12,36 @@ def cast_list_as_strings(mylist):
 
     return mylist_of_strings
 
-def get_interaction_features_from_df(df, count_vectorizer):
-    """
-    Returns a sparse matrix containing the interaction features built by the count vectorizer.
-    Instead of horizontally stacking the features of question1 and question2 independently, 
-    it computes the absolute difference and the element-wise product of their sparse matrices.
-    This provides symmetric features and allows linear models to capture specific word overlaps.
-    """
+# ── ORIGINAL (untouched, written by classmate) ───────────────────────────────
+def get_features_from_df(df, count_vectorizer):
+    """..."""
     q1_casted = cast_list_as_strings(list(df["question1"]))
     q2_casted = cast_list_as_strings(list(df["question2"]))
-
-    # Transform text into sparse Bag-of-Words matrices
     X_q1 = count_vectorizer.transform(q1_casted)
-    X_q2 = count_vectorizer.transform(q2_casted)    
-    
-    # 1. Absolute Difference: |X_q1 - X_q2|
-    # If a word is present in both, 1 - 1 = 0
-    # If a word is present in only one of them, |1 - 0| = 1 or |0 - 1| = 1
-    # The linear model will learn negative weights for words that do not match
+    X_q2 = count_vectorizer.transform(q2_casted)
     X_diff = abs(X_q1 - X_q2)
-    
-    # 2. Element-wise Product: X_q1 * X_q2
-    # If a word is present in both, 1 * 1 = 1
-    # If it is missing in one of them, 1 * 0 = 0
-    # The linear model will learn which specific shared words are key to predict duplicates
-    # Note: We use .multiply() because these are scipy sparse matrices
     X_prod = X_q1.multiply(X_q2)
-    
-    # Horizontally stack the interaction matrices instead of the independent vectors
     X_interactions = scipy.sparse.hstack((X_diff, X_prod))
-
     return X_interactions
+
+
+# ── ADDED ─────────────────────────────────────────────────────────────────────
+def get_sbert_interaction_features(df, sbert_model):  # ADDED
+    """..."""
+    q1_casted = cast_list_as_strings(list(df["question1"]))  # ADDED
+    q2_casted = cast_list_as_strings(list(df["question2"]))  # ADDED
+    emb_q1 = sbert_model.encode(q1_casted, batch_size=256,
+                                 show_progress_bar=False,
+                                 convert_to_numpy=True
+                                 ).astype(np.float16)          # ADDED
+    emb_q2 = sbert_model.encode(q2_casted, batch_size=256,
+                                 show_progress_bar=False,
+                                 convert_to_numpy=True
+                                 ).astype(np.float16)          # ADDED
+    X_diff = np.abs(emb_q1 - emb_q2)                          # ADDED
+    X_prod = emb_q1 * emb_q2                                   # ADDED
+    X_interactions = np.hstack([X_diff, X_prod]).astype(np.float32)  # ADDED
+    return X_interactions                                       # ADDED
 
 def get_mistakes(clf, X_q1q2, y):
     ############### Begin exercise ###################
@@ -250,7 +249,7 @@ def get_combined_features(df, count_vectorizer, tfidf_vectorizer):  # ADDED
     Concatenate sparse BoW features with dense handcrafted features into a
     single scipy sparse matrix.
     """
-    X_bow  = get_interaction_features_from_df(df, count_vectorizer) # Using count_vectorizer works better than using tf-idf
+    X_bow  = get_features_from_df(df, count_vectorizer) # Using count_vectorizer works better than using tf-idf
     X_hand = get_handcrafted_features(df.copy(), tfidf_vectorizer)          # ADDED
     X_combined = scipy.sparse.hstack(                                 # ADDED
         (X_bow, scipy.sparse.csr_matrix(X_hand))                     # ADDED
@@ -341,65 +340,62 @@ def evaluate_model(clf, X, y, model_name="model", split_name="split"):  # ADDED
 
 def get_sbert_interaction_features(df, sbert_model):  # ADDED
     """
-    Encode question pairs with SBERT and return a dense interaction feature
-    matrix following the same design as get_interaction_features_from_df:
+    Returns a dense numpy matrix containing the interaction features built by the SBERT model.
+    Instead of horizontally stacking the embeddings of question1 and question2 independently,
+    it computes the absolute difference and the element-wise product of their dense vectors.
+    This provides symmetric features and allows linear models to capture semantic overlaps.
 
-      [0   : dim)  — absolute difference  |emb_q1 − emb_q2|
-                     Captures *what is different* between the two questions
-                     in the continuous semantic embedding space.  Where BoW
-                     absolute difference is binary (word present / absent),
-                     SBERT difference is graded and semantics-aware: two
-                     near-synonyms "vehicle" / "car" will produce a near-zero
-                     difference even though they don't share a token.
+    Unlike get_features_from_df (which is lexical), SBERT embeddings are semantic:
+    synonyms and paraphrases land close together in the vector space, so the absolute difference
+    will be near-zero even for questions that share no surface tokens but mean the same thing.
 
-      [dim : 2·dim) — element-wise product  emb_q1 ⊙ emb_q2
-                     Captures *what is shared*.  Activates strongly for
-                     semantic dimensions where both questions point in the
-                     same direction (e.g. both are about "money" or "Python").
-
-    Together these two halves give the downstream LogisticRegression enough
-    signal to learn both "these questions are about the same topic" and
-    "these questions ask fundamentally different things within that topic".
-
-    Parameters
-    ----------
-    df          : DataFrame with columns 'question1' and 'question2'
-    sbert_model : a loaded SentenceTransformer instance
-
-    Returns
-    -------
-    numpy float32 array of shape (n_samples, 2 * embedding_dim)
+    Memory strategy: encoding is done in chunks of CHUNK_SIZE pairs. Each chunk is cast to
+    float16 immediately after encoding and written into the pre-allocated output array before
+    the next chunk is requested. This keeps peak intermediate RAM at ~12 MB per chunk
+    instead of ~2.6 GB if the full dataset were encoded at once.
     """
-    q1_list = cast_list_as_strings(list(df["question1"]))  # ADDED
-    q2_list = cast_list_as_strings(list(df["question2"]))  # ADDED
+    q1_casted = cast_list_as_strings(list(df["question1"]))  # ADDED
+    q2_casted = cast_list_as_strings(list(df["question2"]))  # ADDED
 
-    # --- Encode all question1 strings ----------------------------------------
-    # batch_size=256 amortises the Transformer overhead across many sentences
-    # at once; show_progress_bar gives visible feedback on the large train set
-    emb_q1 = sbert_model.encode(   # ADDED
-        q1_list,                    # ADDED
-        batch_size=256,             # ADDED
-        show_progress_bar=True,     # ADDED
-        convert_to_numpy=True,      # ADDED
-    )                               # ADDED
+    n   = len(q1_casted)                                          # ADDED
+    dim = sbert_model.get_sentence_embedding_dimension()           # ADDED  384 for MiniLM
 
-    # --- Encode all question2 strings ----------------------------------------
-    emb_q2 = sbert_model.encode(   # ADDED
-        q2_list,                    # ADDED
-        batch_size=256,             # ADDED
-        show_progress_bar=True,     # ADDED
-        convert_to_numpy=True,      # ADDED
-    )                               # ADDED
+    # Pre-allocate the full output in float32 — shape (n, 2 * dim).
+    # Writing chunk by chunk means we never hold more than one chunk of raw
+    # embeddings in RAM alongside this array.
+    X_interactions = np.zeros((n, 2 * dim), dtype=np.float32)    # ADDED
 
-    # --- Build interaction features (mirrors get_interaction_features_from_df) ---
+    CHUNK_SIZE = 4096  # ADDED  encode this many pairs per iteration (~12 MB peak per chunk)
 
-    # Absolute difference: |emb_q1 − emb_q2|  — shape (n, dim)
-    # A duplicate pair should produce small differences across all dimensions
-    diff = np.abs(emb_q1 - emb_q2)   # ADDED
+    for start in range(0, n, CHUNK_SIZE):                         # ADDED
+        end = min(start + CHUNK_SIZE, n)                          # ADDED
 
-    # Element-wise product: emb_q1 ⊙ emb_q2  — shape (n, dim)
-    # A duplicate pair should produce large positive values in shared directions
-    prod = emb_q1 * emb_q2            # ADDED
+        # Encode one chunk and cast to float16 immediately, freeing the float32 buffer
+        # before we request the next chunk from the GPU.
+        e1 = sbert_model.encode(                                  # ADDED
+            q1_casted[start:end],                                 # ADDED
+            batch_size=256,                                       # ADDED
+            show_progress_bar=False,                              # ADDED
+            convert_to_numpy=True,                                # ADDED
+        ).astype(np.float16)                                      # ADDED
 
-    # Concatenate horizontally → (n_samples, 2 * embedding_dim)
-    return np.hstack([diff, prod]).astype(np.float32)  # ADDED
+        e2 = sbert_model.encode(                                  # ADDED
+            q2_casted[start:end],                                 # ADDED
+            batch_size=256,                                       # ADDED
+            show_progress_bar=False,                              # ADDED
+            convert_to_numpy=True,                                # ADDED
+        ).astype(np.float16)                                      # ADDED
+
+        # 1. Absolute Difference: |e1 - e2|
+        # Near-zero when the two questions are semantically identical across all dims.
+        # The linear model will learn negative weights for dimensions that signal non-duplicates.
+        X_interactions[start:end, :dim] = np.abs(e1 - e2).astype(np.float32)  # ADDED
+
+        # 2. Element-wise Product: e1 * e2
+        # Activates strongly when both questions point in the same semantic direction.
+        # The linear model will learn which semantic dimensions are key to predict duplicates.
+        X_interactions[start:end, dim:] = (e1 * e2).astype(np.float32)        # ADDED
+
+        # e1 and e2 go out of scope here — ~6 MB freed before the next iteration
+
+    return X_interactions  # ADDED  shape: (n_samples, 2 * embedding_dim)
