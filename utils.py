@@ -29,14 +29,13 @@ def get_interaction_features_from_df(df, count_vectorizer):
     # 1. Absolute Difference: |X_q1 - X_q2|
     # If a word is present in both, 1 - 1 = 0
     # If a word is present in only one of them, |1 - 0| = 1 or |0 - 1| = 1
-    # The linear model will learn negative weights for words that do not match
+    # In this way, we expect the linear model to learn negative weights for words that do not match
     X_diff = abs(X_q1 - X_q2)
     
     # 2. Element-wise Product: X_q1 * X_q2
     # If a word is present in both, 1 * 1 = 1
     # If it is missing in one of them, 1 * 0 = 0
-    # The linear model will learn which specific shared words are key to predict duplicates
-    # Note: We use .multiply() because these are scipy sparse matrices
+    # Like this, we want the linear model to learn which specific shared words are key to predict duplicates
     X_prod = X_q1.multiply(X_q2)
     
     # Horizontally stack the interaction matrices instead of the independent vectors
@@ -160,7 +159,7 @@ def cosine_similarity_tfidf_batch(df, tfidf_vectorizer):  # ADDED
 
 def get_handcrafted_features(df, tfidf_vectorizer):  # ADDED
     """
-    Dense feature matrix (n_samples × 5) of handcrafted similarity signals:
+    Dense feature matrix (n_samples × 9) of handcrafted similarity signals:
       col 0 – Jaccard similarity        (from scratch)
       col 1 – Length ratio              min_len / max_len
       col 2 – Common-word F1 ratio      (from scratch)
