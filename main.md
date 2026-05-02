@@ -60,6 +60,47 @@ Additionally, `lcs_ratio` (word-level Longest Common Subsequence) is implemented
 from scratch in `utils.py` and demonstrated in `utils_student.ipynb`; due to its
 O(m·n) per-pair complexity it is not used in the full-dataset pipeline.
 
+### 3.4 SBERT Model — Semantic Embeddings  <!-- ADDED -->
+
+The core limitation of both models above is that they are **lexical**: two
+questions sharing many tokens score high regardless of meaning, and two
+semantically identical questions using different vocabulary (e.g. *"car"* vs
+*"automobile"*) score low.
+
+The SBERT model addresses this by replacing the BoW representation with
+**Sentence-BERT** embeddings.
+
+**Why SBERT and not the other candidate transformers?**
+
+| Architecture | Inference mode | Complexity | Suitability for Quora QQ |
+|---|---|---|---|
+| **RoBERTa** (cross-encoder) | Joint [q1 SEP q2] pass | O(n²) per pair — too slow | ✗ without GPU |
+| **DistilBERT** | Single-sentence encoder | O(n), but no paraphrase fine-tuning | ✗ weaker embeddings |
+| **SBERT** `paraphrase-MiniLM-L6-v2` | Bi-encoder (Siamese) | O(n), paraphrase-trained | ✓ **chosen** |
+| **BART** | Seq-to-seq generator | Not designed for embeddings | ✗ wrong task |
+
+SBERT (Reimers & Gurevych, 2019) uses a Siamese network to fine-tune a
+Transformer so that semantically similar sentences land close together in the
+embedding space. The `paraphrase-MiniLM-L6-v2` checkpoint is explicitly
+trained on paraphrase detection corpora — exactly the Quora task.
+
+**Feature design** (`utils.get_sbert_interaction_features`):
+
+Mirrors `get_interaction_features_from_df` to keep the architecture consistent:
+
+| Column range | Feature | Intuition |
+|---|---|---|
+| `[0 : 384)` | `\|emb_q1 − emb_q2\|` | Captures *what differs* semantically |
+| `[384 : 768)` | `emb_q1 ⊙ emb_q2` | Captures *what is shared* semantically |
+
+A `LogisticRegression(solver="liblinear", random_state=123)` is trained on
+this 768-dimensional dense matrix (same classifier family as the other models).
+
+**Reproducibility**: encoded feature matrices are saved as `.npy` files in
+`models/` by `train_models.ipynb` so `reproduce_results.ipynb` can evaluate
+without re-running the encoder (the SBERT forward pass takes ~1–2 min on CPU
+for 300 k questions; evaluating the LogisticRegression is instantaneous).
+
 ---
 
 ## 4. Results
@@ -74,6 +115,9 @@ O(m·n) per-pair complexity it is not used in the full-dataset pipeline.
 | improved | train | — | — | — | — |
 | improved | val | — | — | — | — |
 | improved | test | — | — | — | — |
+| sbert | train | — | — | — | — |  <!-- ADDED -->
+| sbert | val | — | — | — | — |    <!-- ADDED -->
+| sbert | test | — | — | — | — |   <!-- ADDED -->
 
 ---
 
@@ -82,7 +126,7 @@ O(m·n) per-pair complexity it is not used in the full-dataset pipeline.
 ```
 Name_Surname.zip
 ├── main.pdf              ← this document
-├── environment.yml       ← conda environment (Python 3.9)
+├── environment.yml       ← conda environment (Python 3.9 + sentence-transformers)
 ├── utils.py              ← shared utility functions
 ├── train_models.ipynb    ← trains and saves models to models/
 ├── reproduce_results.ipynb ← loads models, evaluates, displays metrics
@@ -91,7 +135,11 @@ Name_Surname.zip
     ├── count_vectorizer.pkl
     ├── tfidf_vectorizer.pkl
     ├── baseline_logistic.pkl
-    └── improved_logistic.pkl
+    ├── improved_logistic.pkl
+    ├── sbert_logistic.pkl      ← ADDED: LogisticRegression on SBERT features
+    ├── sbert_X_train.npy       ← ADDED: pre-computed SBERT features (train)
+    ├── sbert_X_val.npy         ← ADDED: pre-computed SBERT features (val)
+    └── sbert_X_test.npy        ← ADDED: pre-computed SBERT features (test)
 ```
 
 > **Data path:** `~/Datasets/QuoraQuestionPairs/quora_data.csv`  

@@ -19,3 +19,10 @@ dependencies:
   # Plot / utils 
   - matplotlib-inline=0.1.7
   - matplotlib=3.9.2
+
+  # ADDED — SBERT improved model dependency
+  # sentence-transformers pulls PyTorch automatically; installed via pip because
+  # the package is not available in the 'defaults' conda channel.
+  - pip
+  - pip:
+    - sentence-transformers>=2.7.0   # ADDED

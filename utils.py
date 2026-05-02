@@ -305,3 +305,101 @@ def evaluate_model(clf, X, y, model_name="model", split_name="split"):  # ADDED
         "f1":        round(sklearn.metrics.f1_score(y, y_pred, zero_division=0), 4),           # ADDED
         "accuracy":  round(sklearn.metrics.accuracy_score(y, y_pred), 4),
     }                                           # ADDED
+
+# ADDED ─────────────────────────────────────────────────────────────────────
+# Section 5: SBERT (Sentence-BERT) embedding features
+#
+# Why SBERT and not the other candidates?
+# ─────────────────────────────────────────
+# The four candidate transformer architectures differ fundamentally in how
+# they process sentence pairs, and the Quora task demands a specific trade-off:
+#
+#   • RoBERTa (cross-encoder) – feeds [CLS] q1 [SEP] q2 [SEP] through a
+#     full Transformer and reads the [CLS] representation as the pair score.
+#     State-of-the-art accuracy, but requires a *forward pass per pair*, so
+#     inference is O(n²) — prohibitively slow for 300 k question pairs without
+#     a high-end GPU.
+#
+#   • DistilBERT – a distilled, 60%-smaller version of BERT; faster, but it
+#     was NOT fine-tuned for semantic similarity.  Used as a sentence encoder
+#     it needs additional pooling (mean-pooling) and produces lower-quality
+#     embeddings than a dedicated model.
+#
+#   • SBERT (bi-encoder, Reimers & Gurevych 2019) — encodes EACH question
+#     *independently* into a fixed-size dense vector with a Siamese network
+#     fine-tuned on NLI + STS corpora.  Pairwise comparison reduces to a
+#     cosine / dot product — O(n) inference, fast even on CPU.
+#     The "paraphrase-MiniLM-L6-v2" variant is explicitly trained on
+#     *paraphrase detection* corpora (which is exactly the Quora task) and
+#     produces 384-dimensional vectors in < 1 min for 300 k sentences on CPU.
+#
+#   • BART – a sequence-to-sequence generative model; designed for tasks like
+#     summarisation and translation, not embedding-based similarity.
+#
+# Verdict: SBERT with paraphrase-MiniLM-L6-v2 is the right choice.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_sbert_interaction_features(df, sbert_model):  # ADDED
+    """
+    Encode question pairs with SBERT and return a dense interaction feature
+    matrix following the same design as get_interaction_features_from_df:
+
+      [0   : dim)  — absolute difference  |emb_q1 − emb_q2|
+                     Captures *what is different* between the two questions
+                     in the continuous semantic embedding space.  Where BoW
+                     absolute difference is binary (word present / absent),
+                     SBERT difference is graded and semantics-aware: two
+                     near-synonyms "vehicle" / "car" will produce a near-zero
+                     difference even though they don't share a token.
+
+      [dim : 2·dim) — element-wise product  emb_q1 ⊙ emb_q2
+                     Captures *what is shared*.  Activates strongly for
+                     semantic dimensions where both questions point in the
+                     same direction (e.g. both are about "money" or "Python").
+
+    Together these two halves give the downstream LogisticRegression enough
+    signal to learn both "these questions are about the same topic" and
+    "these questions ask fundamentally different things within that topic".
+
+    Parameters
+    ----------
+    df          : DataFrame with columns 'question1' and 'question2'
+    sbert_model : a loaded SentenceTransformer instance
+
+    Returns
+    -------
+    numpy float32 array of shape (n_samples, 2 * embedding_dim)
+    """
+    q1_list = cast_list_as_strings(list(df["question1"]))  # ADDED
+    q2_list = cast_list_as_strings(list(df["question2"]))  # ADDED
+
+    # --- Encode all question1 strings ----------------------------------------
+    # batch_size=256 amortises the Transformer overhead across many sentences
+    # at once; show_progress_bar gives visible feedback on the large train set
+    emb_q1 = sbert_model.encode(   # ADDED
+        q1_list,                    # ADDED
+        batch_size=256,             # ADDED
+        show_progress_bar=True,     # ADDED
+        convert_to_numpy=True,      # ADDED
+    )                               # ADDED
+
+    # --- Encode all question2 strings ----------------------------------------
+    emb_q2 = sbert_model.encode(   # ADDED
+        q2_list,                    # ADDED
+        batch_size=256,             # ADDED
+        show_progress_bar=True,     # ADDED
+        convert_to_numpy=True,      # ADDED
+    )                               # ADDED
+
+    # --- Build interaction features (mirrors get_interaction_features_from_df) ---
+
+    # Absolute difference: |emb_q1 − emb_q2|  — shape (n, dim)
+    # A duplicate pair should produce small differences across all dimensions
+    diff = np.abs(emb_q1 - emb_q2)   # ADDED
+
+    # Element-wise product: emb_q1 ⊙ emb_q2  — shape (n, dim)
+    # A duplicate pair should produce large positive values in shared directions
+    prod = emb_q1 * emb_q2            # ADDED
+
+    # Concatenate horizontally → (n_samples, 2 * embedding_dim)
+    return np.hstack([diff, prod]).astype(np.float32)  # ADDED
