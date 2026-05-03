@@ -101,6 +101,34 @@ this 768-dimensional dense matrix (same classifier family as the other models).
 without re-running the encoder (the SBERT forward pass takes ~1–2 min on CPU
 for 300 k questions; evaluating the LogisticRegression is instantaneous).
 
+### 3.5 SBERT + Graph Model — Magic Features  <!-- ADDED -->
+
+The best model combines SBERT embeddings with **graph-based ("magic") features**,
+the approach used by virtually every top-10 solution in this competition.
+
+**Why graph features matter:**  
+The Quora dataset has a graph structure: each unique question is a node and each
+CSV row is an undirected edge q1─q2.  Quora built the dataset by upsampling
+duplicate pairs, embedding two structural signals into the graph:
+
+1. **Question frequency** — frequently-appearing questions are "hub" nodes asked
+   many times; repeated questions are almost always semantic duplicates.
+2. **Common neighbors** — if q1 and q2 share even one graph neighbor (a question
+   both are paired with), the probability of them being a duplicate drops from
+   ~80% to <40% (InData Labs top-5 analysis; jturkewitz +0.03 Kaggle notebook).
+
+**Feature layout** (774 dimensions total):
+
+| Block | Dims | Features |
+|-------|------|---------|
+| SBERT `\|emb_q1 − emb_q2\|` | 0–383 | Semantic difference |
+| SBERT `emb_q1 ⊙ emb_q2` | 384–767 | Semantic overlap |
+| Graph | 768–773 | q1_freq, q2_freq, freq_min, freq_max, freq_diff, intersect |
+
+**No leakage**: `freq_dict` and `neighbor_dict` are built from `train_df` only
+and applied read-only to val and test sets.  Questions unseen during training
+receive frequency=0 and empty neighbor set (conservative prior).
+
 ---
 
 ## 4. Results
@@ -118,6 +146,9 @@ for 300 k questions; evaluating the LogisticRegression is instantaneous).
 | sbert | train | — | — | — | — |  <!-- ADDED -->
 | sbert | val | — | — | — | — |    <!-- ADDED -->
 | sbert | test | — | — | — | — |   <!-- ADDED -->
+| sbert_graph | train | — | — | — | — |  <!-- ADDED -->
+| sbert_graph | val | — | — | — | — |    <!-- ADDED -->
+| sbert_graph | test | — | — | — | — |   <!-- ADDED -->
 
 ---
 
@@ -139,7 +170,13 @@ Name_Surname.zip
     ├── sbert_logistic.pkl      ← ADDED: LogisticRegression on SBERT features
     ├── sbert_X_train.npy       ← ADDED: pre-computed SBERT features (train)
     ├── sbert_X_val.npy         ← ADDED: pre-computed SBERT features (val)
-    └── sbert_X_test.npy        ← ADDED: pre-computed SBERT features (test)
+    ├── sbert_X_test.npy        ← ADDED: pre-computed SBERT features (test)
+    ├── sbert_graph_logistic.pkl      ← ADDED: LogisticRegression on SBERT+Graph features
+    ├── sbert_graph_X_train.npy       ← ADDED: pre-computed SBERT+Graph features (train)
+    ├── sbert_graph_X_val.npy         ← ADDED: pre-computed SBERT+Graph features (val)
+    ├── sbert_graph_X_test.npy        ← ADDED: pre-computed SBERT+Graph features (test)
+    ├── freq_dict.pkl                 ← ADDED: question frequency dict (built from train only)
+    └── neighbor_dict.pkl             ← ADDED: question adjacency dict (built from train only)
 ```
 
 > **Data path:** `~/Datasets/QuoraQuestionPairs/quora_data.csv`  

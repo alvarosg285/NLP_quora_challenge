@@ -12,36 +12,37 @@ def cast_list_as_strings(mylist):
 
     return mylist_of_strings
 
-# ── ORIGINAL (untouched, written by classmate) ───────────────────────────────
-def get_features_from_df(df, count_vectorizer):
-    """..."""
+def get_interaction_features_from_df(df, count_vectorizer):
+    """
+    Returns a sparse matrix containing the interaction features built by the count vectorizer.
+    Instead of horizontally stacking the features of question1 and question2 independently, 
+    it computes the absolute difference and the element-wise product of their sparse matrices.
+    This provides symmetric features and allows linear models to capture specific word overlaps.
+    """
     q1_casted = cast_list_as_strings(list(df["question1"]))
     q2_casted = cast_list_as_strings(list(df["question2"]))
+
+    # Transform text into sparse Bag-of-Words matrices
     X_q1 = count_vectorizer.transform(q1_casted)
-    X_q2 = count_vectorizer.transform(q2_casted)
+    X_q2 = count_vectorizer.transform(q2_casted)    
+    
+    # 1. Absolute Difference: |X_q1 - X_q2|
+    # If a word is present in both, 1 - 1 = 0
+    # If a word is present in only one of them, |1 - 0| = 1 or |0 - 1| = 1
+    # The linear model will learn negative weights for words that do not match
     X_diff = abs(X_q1 - X_q2)
+    
+    # 2. Element-wise Product: X_q1 * X_q2
+    # If a word is present in both, 1 * 1 = 1
+    # If it is missing in one of them, 1 * 0 = 0
+    # The linear model will learn which specific shared words are key to predict duplicates
+    # Note: We use .multiply() because these are scipy sparse matrices
     X_prod = X_q1.multiply(X_q2)
+    
+    # Horizontally stack the interaction matrices instead of the independent vectors
     X_interactions = scipy.sparse.hstack((X_diff, X_prod))
+
     return X_interactions
-
-
-# ── ADDED ─────────────────────────────────────────────────────────────────────
-def get_sbert_interaction_features(df, sbert_model):  # ADDED
-    """..."""
-    q1_casted = cast_list_as_strings(list(df["question1"]))  # ADDED
-    q2_casted = cast_list_as_strings(list(df["question2"]))  # ADDED
-    emb_q1 = sbert_model.encode(q1_casted, batch_size=256,
-                                 show_progress_bar=False,
-                                 convert_to_numpy=True
-                                 ).astype(np.float16)          # ADDED
-    emb_q2 = sbert_model.encode(q2_casted, batch_size=256,
-                                 show_progress_bar=False,
-                                 convert_to_numpy=True
-                                 ).astype(np.float16)          # ADDED
-    X_diff = np.abs(emb_q1 - emb_q2)                          # ADDED
-    X_prod = emb_q1 * emb_q2                                   # ADDED
-    X_interactions = np.hstack([X_diff, X_prod]).astype(np.float32)  # ADDED
-    return X_interactions                                       # ADDED
 
 def get_mistakes(clf, X_q1q2, y):
     ############### Begin exercise ###################
@@ -249,7 +250,7 @@ def get_combined_features(df, count_vectorizer, tfidf_vectorizer):  # ADDED
     Concatenate sparse BoW features with dense handcrafted features into a
     single scipy sparse matrix.
     """
-    X_bow  = get_features_from_df(df, count_vectorizer) # Using count_vectorizer works better than using tf-idf
+    X_bow  = get_interaction_features_from_df(df, count_vectorizer) # Using count_vectorizer works better than using tf-idf
     X_hand = get_handcrafted_features(df.copy(), tfidf_vectorizer)          # ADDED
     X_combined = scipy.sparse.hstack(                                 # ADDED
         (X_bow, scipy.sparse.csr_matrix(X_hand))                     # ADDED
@@ -340,62 +341,252 @@ def evaluate_model(clf, X, y, model_name="model", split_name="split"):  # ADDED
 
 def get_sbert_interaction_features(df, sbert_model):  # ADDED
     """
-    Returns a dense numpy matrix containing the interaction features built by the SBERT model.
-    Instead of horizontally stacking the embeddings of question1 and question2 independently,
-    it computes the absolute difference and the element-wise product of their dense vectors.
-    This provides symmetric features and allows linear models to capture semantic overlaps.
+    Encode question pairs with SBERT and return a dense interaction feature
+    matrix following the same design as get_interaction_features_from_df:
 
-    Unlike get_features_from_df (which is lexical), SBERT embeddings are semantic:
-    synonyms and paraphrases land close together in the vector space, so the absolute difference
-    will be near-zero even for questions that share no surface tokens but mean the same thing.
+      [0   : dim)  — absolute difference  |emb_q1 − emb_q2|
+                     Captures *what is different* between the two questions
+                     in the continuous semantic embedding space.  Where BoW
+                     absolute difference is binary (word present / absent),
+                     SBERT difference is graded and semantics-aware: two
+                     near-synonyms "vehicle" / "car" will produce a near-zero
+                     difference even though they don't share a token.
 
-    Memory strategy: encoding is done in chunks of CHUNK_SIZE pairs. Each chunk is cast to
-    float16 immediately after encoding and written into the pre-allocated output array before
-    the next chunk is requested. This keeps peak intermediate RAM at ~12 MB per chunk
-    instead of ~2.6 GB if the full dataset were encoded at once.
+      [dim : 2·dim) — element-wise product  emb_q1 ⊙ emb_q2
+                     Captures *what is shared*.  Activates strongly for
+                     semantic dimensions where both questions point in the
+                     same direction (e.g. both are about "money" or "Python").
+
+    Together these two halves give the downstream LogisticRegression enough
+    signal to learn both "these questions are about the same topic" and
+    "these questions ask fundamentally different things within that topic".
+
+    Parameters
+    ----------
+    df          : DataFrame with columns 'question1' and 'question2'
+    sbert_model : a loaded SentenceTransformer instance
+
+    Returns
+    -------
+    numpy float32 array of shape (n_samples, 2 * embedding_dim)
     """
-    q1_casted = cast_list_as_strings(list(df["question1"]))  # ADDED
-    q2_casted = cast_list_as_strings(list(df["question2"]))  # ADDED
+    q1_list = cast_list_as_strings(list(df["question1"]))  # ADDED
+    q2_list = cast_list_as_strings(list(df["question2"]))  # ADDED
 
-    n   = len(q1_casted)                                          # ADDED
-    dim = sbert_model.get_sentence_embedding_dimension()           # ADDED  384 for MiniLM
+    # --- Encode all question1 strings ----------------------------------------
+    # batch_size=256 amortises the Transformer overhead across many sentences
+    # at once; show_progress_bar gives visible feedback on the large train set
+    emb_q1 = sbert_model.encode(   # ADDED
+        q1_list,                    # ADDED
+        batch_size=256,             # ADDED
+        show_progress_bar=True,     # ADDED
+        convert_to_numpy=True,      # ADDED
+    )                               # ADDED
 
-    # Pre-allocate the full output in float32 — shape (n, 2 * dim).
-    # Writing chunk by chunk means we never hold more than one chunk of raw
-    # embeddings in RAM alongside this array.
-    X_interactions = np.zeros((n, 2 * dim), dtype=np.float32)    # ADDED
+    # --- Encode all question2 strings ----------------------------------------
+    emb_q2 = sbert_model.encode(   # ADDED
+        q2_list,                    # ADDED
+        batch_size=256,             # ADDED
+        show_progress_bar=True,     # ADDED
+        convert_to_numpy=True,      # ADDED
+    )                               # ADDED
 
-    CHUNK_SIZE = 4096  # ADDED  encode this many pairs per iteration (~12 MB peak per chunk)
+    # --- Build interaction features (mirrors get_interaction_features_from_df) ---
 
-    for start in range(0, n, CHUNK_SIZE):                         # ADDED
-        end = min(start + CHUNK_SIZE, n)                          # ADDED
+    # Absolute difference: |emb_q1 − emb_q2|  — shape (n, dim)
+    # A duplicate pair should produce small differences across all dimensions
+    diff = np.abs(emb_q1 - emb_q2)   # ADDED
 
-        # Encode one chunk and cast to float16 immediately, freeing the float32 buffer
-        # before we request the next chunk from the GPU.
-        e1 = sbert_model.encode(                                  # ADDED
-            q1_casted[start:end],                                 # ADDED
-            batch_size=256,                                       # ADDED
-            show_progress_bar=False,                              # ADDED
-            convert_to_numpy=True,                                # ADDED
-        ).astype(np.float16)                                      # ADDED
+    # Element-wise product: emb_q1 ⊙ emb_q2  — shape (n, dim)
+    # A duplicate pair should produce large positive values in shared directions
+    prod = emb_q1 * emb_q2            # ADDED
 
-        e2 = sbert_model.encode(                                  # ADDED
-            q2_casted[start:end],                                 # ADDED
-            batch_size=256,                                       # ADDED
-            show_progress_bar=False,                              # ADDED
-            convert_to_numpy=True,                                # ADDED
-        ).astype(np.float16)                                      # ADDED
+    # Concatenate horizontally → (n_samples, 2 * embedding_dim)
+    return np.hstack([diff, prod]).astype(np.float32)  # ADDED
 
-        # 1. Absolute Difference: |e1 - e2|
-        # Near-zero when the two questions are semantically identical across all dims.
-        # The linear model will learn negative weights for dimensions that signal non-duplicates.
-        X_interactions[start:end, :dim] = np.abs(e1 - e2).astype(np.float32)  # ADDED
 
-        # 2. Element-wise Product: e1 * e2
-        # Activates strongly when both questions point in the same semantic direction.
-        # The linear model will learn which semantic dimensions are key to predict duplicates.
-        X_interactions[start:end, dim:] = (e1 * e2).astype(np.float32)        # ADDED
+# ADDED ─────────────────────────────────────────────────────────────────────
+# Section 6: Graph / "Magic" features
+#
+# Background — why these features are the single biggest gain in this competition
+# ──────────────────────────────────────────────────────────────────────────────
+# The Quora dataset is a *graph*: every unique question is a node and every row
+# in the CSV is an undirected edge (q1)─(q2).  Quora built the dataset by
+# upsampling duplicate pairs, which created a strong structural signal:
+#
+#   • Frequently-appearing questions (high-degree nodes) tend to be "hub"
+#     questions asked many times — and repeated questions are almost always
+#     semantic duplicates.
+#
+#   • If q1 and q2 share many common graph-neighbors (questions they are each
+#     paired with), it is very likely they are paraphrases of each other.
+#     InData Labs (top-5 finish) showed that ~80 % of pairs with 0 common
+#     neighbors are duplicates, while pairs with ≥1 common neighbor have
+#     < 40 % chance of being duplicates — an almost perfect binary signal.
+#
+# These are the "magic features" discussed in the Kaggle forums and used by
+# virtually every top-10 solution (jturkewitz +0.03 gain notebook, winning
+# solution PDF by Maximilien Baudry, InData Labs blog post, aerdem4 top-23).
+#
+# IMPORTANT — no data leakage
+# ────────────────────────────
+# build_freq_dict and build_neighbor_dict must be called on TRAINING data only.
+# The resulting dictionaries are then applied (read-only) to val and test.
+# Questions unseen during training get frequency=0 and an empty neighbor set,
+# which is the correct conservative prior.
+# ─────────────────────────────────────────────────────────────────────────────
 
-        # e1 and e2 go out of scope here — ~6 MB freed before the next iteration
+def build_freq_dict(df):  # ADDED
+    """
+    Build a question-frequency dictionary from a DataFrame.
 
-    return X_interactions  # ADDED  shape: (n_samples, 2 * embedding_dim)
+    freq_dict[q] = number of times question q appears across both the
+    'question1' and 'question2' columns of df.  This is equivalent to the
+    degree of node q in the question-pair graph.
+
+    Must be built on TRAINING data only — pass train_df, never the full dataset.
+
+    Parameters
+    ----------
+    df : DataFrame with columns 'question1' and 'question2'
+
+    Returns
+    -------
+    dict  {question_string: int}
+    """
+    freq_dict = {}  # ADDED
+    all_questions = (                                          # ADDED
+        cast_list_as_strings(list(df["question1"])) +         # ADDED
+        cast_list_as_strings(list(df["question2"]))           # ADDED
+    )                                                          # ADDED
+    for q in all_questions:                                    # ADDED
+        freq_dict[q] = freq_dict.get(q, 0) + 1               # ADDED
+    return freq_dict                                           # ADDED
+
+
+def build_neighbor_dict(df):  # ADDED
+    """
+    Build a question-adjacency dictionary from a DataFrame.
+
+    neighbor_dict[q] = set of all questions that q is directly paired with
+    in the dataset.  This is the adjacency list of the question-pair graph:
+    each unique question is a node and each CSV row is an undirected edge.
+
+    Must be built on TRAINING data only — pass train_df, never the full dataset.
+
+    Parameters
+    ----------
+    df : DataFrame with columns 'question1' and 'question2'
+
+    Returns
+    -------
+    dict  {question_string: set of neighbor question strings}
+    """
+    neighbor_dict = {}                                                  # ADDED
+    q1_list = cast_list_as_strings(list(df["question1"]))              # ADDED
+    q2_list = cast_list_as_strings(list(df["question2"]))              # ADDED
+    for q1, q2 in zip(q1_list, q2_list):                               # ADDED
+        # Add q2 to q1's neighbor set and vice-versa (undirected graph)
+        neighbor_dict.setdefault(q1, set()).add(q2)                    # ADDED
+        neighbor_dict.setdefault(q2, set()).add(q1)                    # ADDED
+    return neighbor_dict                                                # ADDED
+
+
+def get_graph_features(df, freq_dict, neighbor_dict):  # ADDED
+    """
+    Extract graph-based ("magic") features for each question pair.
+
+    These six features capture the structural position of each question in the
+    question-pair graph.  They were the most impactful feature family across
+    virtually all top-10 Quora Kaggle solutions.
+
+    Feature matrix columns
+    ─────────────────────
+      col 0 – q1_freq      : degree of q1 node (how often q1 appears in train)
+      col 1 – q2_freq      : degree of q2 node (how often q2 appears in train)
+      col 2 – freq_min     : min(q1_freq, q2_freq) — both must be frequent
+      col 3 – freq_max     : max(q1_freq, q2_freq) — at least one is frequent
+      col 4 – freq_diff    : |q1_freq - q2_freq|   — asymmetry signal
+      col 5 – intersect    : |neighbors(q1) ∩ neighbors(q2)|
+                             The single strongest individual feature:
+                             if q1 and q2 share even one neighbor, the
+                             probability of them being a duplicate pair
+                             drops from ~80 % to < 40 % (InData Labs analysis)
+
+    Questions not seen during training receive freq=0 / empty neighbor set,
+    which is the correct conservative prior for unseen questions.
+
+    Parameters
+    ----------
+    df            : DataFrame with columns 'question1' and 'question2'
+    freq_dict     : output of build_freq_dict(train_df)
+    neighbor_dict : output of build_neighbor_dict(train_df)
+
+    Returns
+    -------
+    numpy float32 array of shape (n_samples, 6)
+    """
+    q1_list = cast_list_as_strings(list(df["question1"]))    # ADDED
+    q2_list = cast_list_as_strings(list(df["question2"]))    # ADDED
+    n = len(q1_list)                                          # ADDED
+    feats = np.zeros((n, 6), dtype=np.float32)               # ADDED
+
+    for i, (q1, q2) in enumerate(zip(q1_list, q2_list)):    # ADDED
+        f1 = freq_dict.get(q1, 0)                            # ADDED
+        f2 = freq_dict.get(q2, 0)                            # ADDED
+
+        # col 0-4: frequency-based features
+        feats[i, 0] = f1                                     # ADDED
+        feats[i, 1] = f2                                     # ADDED
+        feats[i, 2] = min(f1, f2)                            # ADDED
+        feats[i, 3] = max(f1, f2)                            # ADDED
+        feats[i, 4] = abs(f1 - f2)                           # ADDED
+
+        # col 5: neighbor intersection — the "magic" feature
+        # Set intersection is O(min(|N1|,|N2|)); most nodes have small degree
+        # so this is fast in practice even for 300 k pairs.
+        n1 = neighbor_dict.get(q1, set())                    # ADDED
+        n2 = neighbor_dict.get(q2, set())                    # ADDED
+        feats[i, 5] = len(n1 & n2)                           # ADDED
+
+    return feats                                              # ADDED
+
+
+def get_sbert_graph_features(df, sbert_model,                # ADDED
+                              freq_dict, neighbor_dict,       # ADDED
+                              sbert_feat_path=None):          # ADDED
+    """
+    Combine pre-computed (or freshly encoded) SBERT interaction features with
+    graph features into a single dense matrix consumed by the improved model.
+
+    Layout:  [  SBERT diff  |  SBERT prod  |  graph (6 cols)  ]
+              (n, 384)         (n, 384)       (n, 6)
+              → total: (n, 774)
+
+    The SBERT block is loaded from disk if sbert_feat_path is given and the
+    file exists; otherwise it is encoded on the fly.  This avoids redundant
+    GPU passes when the features have already been computed by train_models.ipynb.
+
+    Parameters
+    ----------
+    df             : DataFrame with columns 'question1' and 'question2'
+    sbert_model    : loaded SentenceTransformer (used only if .npy missing)
+    freq_dict      : output of build_freq_dict(train_df)
+    neighbor_dict  : output of build_neighbor_dict(train_df)
+    sbert_feat_path: optional path to a pre-computed .npy SBERT feature matrix
+
+    Returns
+    -------
+    numpy float32 array of shape (n_samples, 774)
+    """
+    # --- Load or compute the SBERT block ------------------------------------
+    if sbert_feat_path is not None and os.path.exists(sbert_feat_path):  # ADDED
+        X_sbert = np.load(sbert_feat_path)                               # ADDED
+    else:                                                                  # ADDED
+        X_sbert = get_sbert_interaction_features(df, sbert_model)        # ADDED
+
+    # --- Compute the graph block --------------------------------------------
+    X_graph = get_graph_features(df, freq_dict, neighbor_dict)            # ADDED
+
+    # --- Concatenate and return ---------------------------------------------
+    return np.hstack([X_sbert, X_graph]).astype(np.float32)              # ADDED
