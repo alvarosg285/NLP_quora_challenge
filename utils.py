@@ -298,66 +298,16 @@ def evaluate_model(clf, X, y, model_name="model", split_name="split"):
     }                                           
 
 # Section 5: SBERT (Sentence-BERT) embedding features
-#
-# Why SBERT and not the other candidates?
-# ─────────────────────────────────────────
-# The four candidate transformer architectures differ fundamentally in how
-# they process sentence pairs, and the Quora task demands a specific trade-off:
-#
-#   • RoBERTa (cross-encoder) – feeds [CLS] q1 [SEP] q2 [SEP] through a
-#     full Transformer and reads the [CLS] representation as the pair score.
-#     State-of-the-art accuracy, but requires a *forward pass per pair*, so
-#     inference is O(n²) — prohibitively slow for 300 k question pairs without
-#     a high-end GPU.
-#
-#   • DistilBERT – a distilled, 60%-smaller version of BERT; faster, but it
-#     was NOT fine-tuned for semantic similarity.  Used as a sentence encoder
-#     it needs additional pooling (mean-pooling) and produces lower-quality
-#     embeddings than a dedicated model.
-#
-#   • SBERT (bi-encoder, Reimers & Gurevych 2019) — encodes EACH question
-#     *independently* into a fixed-size dense vector with a Siamese network
-#     fine-tuned on NLI + STS corpora.  Pairwise comparison reduces to a
-#     cosine / dot product — O(n) inference, fast even on CPU.
-#     The "paraphrase-MiniLM-L6-v2" variant is explicitly trained on
-#     *paraphrase detection* corpora (which is exactly the Quora task) and
-#     produces 384-dimensional vectors in < 1 min for 300 k sentences on CPU.
-#
-#   • BART – a sequence-to-sequence generative model; designed for tasks like
-#     summarisation and translation, not embedding-based similarity.
-#
-# Verdict: SBERT with paraphrase-MiniLM-L6-v2 is the right choice.
+# SBERT encodes each question independently into a dense vector (O(n) inference).
+# paraphrase-MiniLM-L6-v2 is fine-tuned specifically on paraphrase detection,
+# which maps directly to the Quora task. See utils_Arnau_Soler.ipynb for details.
 
 def get_sbert_interaction_features(df, sbert_model):  
     """
-    Encode question pairs with SBERT and return a dense interaction feature
-    matrix following the same design as get_interaction_features_from_df:
-
-      [0   : dim)  — absolute difference  |emb_q1 − emb_q2|
-                     Captures *what is different* between the two questions
-                     in the continuous semantic embedding space.  Where BoW
-                     absolute difference is binary (word present / absent),
-                     SBERT difference is graded and semantics-aware: two
-                     near-synonyms "vehicle" / "car" will produce a near-zero
-                     difference even though they don't share a token.
-
-      [dim : 2·dim) — element-wise product  emb_q1 ⊙ emb_q2
-                     Captures *what is shared*.  Activates strongly for
-                     semantic dimensions where both questions point in the
-                     same direction (e.g. both are about "money" or "Python").
-
-    Together these two halves give the downstream LogisticRegression enough
-    signal to learn both "these questions are about the same topic" and
-    "these questions ask fundamentally different things within that topic".
-
-    Parameters
-    ----------
-    df          : DataFrame with columns 'question1' and 'question2'
-    sbert_model : a loaded SentenceTransformer instance
-
-    Returns
-    -------
-    numpy float32 array of shape (n_samples, 2 * embedding_dim)
+    Encode question pairs with SBERT and return a (n, 2*dim) interaction matrix.
+    First half: |emb_q1 - emb_q2|  (what is different between the two questions).
+    Second half: emb_q1 * emb_q2   (what is shared between the two questions).
+    Mirrors the design of get_interaction_features_from_df but in semantic space.
     """
     q1_list = cast_list_as_strings(list(df["question1"]))  
     q2_list = cast_list_as_strings(list(df["question2"]))  
@@ -395,52 +345,19 @@ def get_sbert_interaction_features(df, sbert_model):
 
 
 # Section 6: Graph / "Magic" features
-#
-# Background — why these features are the single biggest gain in this competition
-# ──────────────────────────────────────────────────────────────────────────────
-# The Quora dataset is a *graph*: every unique question is a node and every row
-# in the CSV is an undirected edge (q1)─(q2).  Quora built the dataset by
-# upsampling duplicate pairs, which created a strong structural signal:
-#
-#   • Frequently-appearing questions (high-degree nodes) tend to be "hub"
-#     questions asked many times — and repeated questions are almost always
-#     semantic duplicates.
-#
-#   • If q1 and q2 share many common graph-neighbors (questions they are each
-#     paired with), it is very likely they are paraphrases of each other.
-#     InData Labs (top-5 finish) showed that ~80 % of pairs with 0 common
-#     neighbors are duplicates, while pairs with ≥1 common neighbor have
-#     < 40 % chance of being duplicates — an almost perfect binary signal.
-#
-# These are the "magic features" discussed in the Kaggle forums and used by
-# virtually every top-10 solution (jturkewitz +0.03 gain notebook, winning
-# solution PDF by Maximilien Baudry, InData Labs blog post, aerdem4 top-23).
-#
-# IMPORTANT — no data leakage
-# ────────────────────────────
-# build_freq_dict and build_neighbor_dict must be called on TRAINING data only.
-# The resulting dictionaries are then applied (read-only) to val and test.
-# Questions unseen during training get frequency=0 and an empty neighbor set,
-# which is the correct conservative prior.
-# ─────────────────────────────────────────────────────────────────────────────
+# The Quora dataset forms a graph: questions are nodes, CSV rows are edges.
+# Two structural signals proved the strongest in top Kaggle solutions:
+#   1. High-degree nodes (frequent questions) tend to be duplicates.
+#   2. Questions sharing ≥1 common neighbour are far less likely to be duplicates.
+# build_freq_dict and build_neighbor_dict MUST be called on training data only.
+# See utils_Arnau_Soler.ipynb for the full analysis.
 
 def build_freq_dict(df):  
     """
-    Build a question-frequency dictionary from a DataFrame.
-
-    freq_dict[q] = number of times question q appears across both the
-    'question1' and 'question2' columns of df.  This is equivalent to the
-    degree of node q in the question-pair graph.
-
-    Must be built on TRAINING data only — pass train_df, never the full dataset.
-
-    Parameters
-    ----------
-    df : DataFrame with columns 'question1' and 'question2'
-
-    Returns
-    -------
-    dict  {question_string: int}
+    Count how many times each question appears across both columns of df.
+    Equivalent to the node degree in the question-pair graph.
+    Must be called on training data only to avoid leakage.
+    Returns dict {question_string: int}.
     """
     freq_dict = {}  
     all_questions = (                                          
@@ -454,21 +371,10 @@ def build_freq_dict(df):
 
 def build_neighbor_dict(df):  
     """
-    Build a question-adjacency dictionary from a DataFrame.
-
-    neighbor_dict[q] = set of all questions that q is directly paired with
-    in the dataset.  This is the adjacency list of the question-pair graph:
-    each unique question is a node and each CSV row is an undirected edge.
-
-    Must be built on TRAINING data only — pass train_df, never the full dataset.
-
-    Parameters
-    ----------
-    df : DataFrame with columns 'question1' and 'question2'
-
-    Returns
-    -------
-    dict  {question_string: set of neighbor question strings}
+    Build the adjacency list of the question-pair graph from df.
+    neighbor_dict[q] = set of all questions q is paired with.
+    Must be called on training data only to avoid leakage.
+    Returns dict {question_string: set of neighbor strings}.
     """
     neighbor_dict = {}                                                  
     q1_list = cast_list_as_strings(list(df["question1"]))              
@@ -482,37 +388,14 @@ def build_neighbor_dict(df):
 
 def get_graph_features(df, freq_dict, neighbor_dict):  
     """
-    Extract graph-based ("magic") features for each question pair.
-
-    These six features capture the structural position of each question in the
-    question-pair graph.  They were the most impactful feature family across
-    virtually all top-10 Quora Kaggle solutions.
-
-    Feature matrix columns
-    ─────────────────────
-      col 0 – q1_freq      : degree of q1 node (how often q1 appears in train)
-      col 1 – q2_freq      : degree of q2 node (how often q2 appears in train)
-      col 2 – freq_min     : min(q1_freq, q2_freq) — both must be frequent
-      col 3 – freq_max     : max(q1_freq, q2_freq) — at least one is frequent
-      col 4 – freq_diff    : |q1_freq - q2_freq|   — asymmetry signal
-      col 5 – intersect    : |neighbors(q1) ∩ neighbors(q2)|
-                             The single strongest individual feature:
-                             if q1 and q2 share even one neighbor, the
-                             probability of them being a duplicate pair
-                             drops from ~80 % to < 40 % (InData Labs analysis)
-
-    Questions not seen during training receive freq=0 / empty neighbor set,
-    which is the correct conservative prior for unseen questions.
-
-    Parameters
-    ----------
-    df            : DataFrame with columns 'question1' and 'question2'
-    freq_dict     : output of build_freq_dict(train_df)
-    neighbor_dict : output of build_neighbor_dict(train_df)
-
-    Returns
-    -------
-    numpy float32 array of shape (n_samples, 6)
+    Extract 6 graph-based features per question pair (n_samples, 6):
+      col 0 – q1_freq   : how often q1 appears in training data
+      col 1 – q2_freq   : how often q2 appears in training data
+      col 2 – freq_min  : min(q1_freq, q2_freq)
+      col 3 – freq_max  : max(q1_freq, q2_freq)
+      col 4 – freq_diff : |q1_freq - q2_freq|
+      col 5 – intersect : |neighbors(q1) ∩ neighbors(q2)|  (the key "magic" feature)
+    Unseen questions get freq=0 and empty neighbor set.
     """
     q1_list = cast_list_as_strings(list(df["question1"]))    
     q2_list = cast_list_as_strings(list(df["question2"]))    
@@ -544,28 +427,10 @@ def get_sbert_graph_features(df, sbert_model,
                               freq_dict, neighbor_dict,       
                               sbert_feat_path=None):          
     """
-    Combine pre-computed (or freshly encoded) SBERT interaction features with
-    graph features into a single dense matrix consumed by the improved model.
-
-    Layout:  [  SBERT diff  |  SBERT prod  |  graph (6 cols)  ]
-              (n, 384)         (n, 384)       (n, 6)
-              → total: (n, 774)
-
-    The SBERT block is loaded from disk if sbert_feat_path is given and the
-    file exists; otherwise it is encoded on the fly.  This avoids redundant
-    GPU passes when the features have already been computed by train_models.ipynb.
-
-    Parameters
-    ----------
-    df             : DataFrame with columns 'question1' and 'question2'
-    sbert_model    : loaded SentenceTransformer (used only if .npy missing)
-    freq_dict      : output of build_freq_dict(train_df)
-    neighbor_dict  : output of build_neighbor_dict(train_df)
-    sbert_feat_path: optional path to a pre-computed .npy SBERT feature matrix
-
-    Returns
-    -------
-    numpy float32 array of shape (n_samples, 774)
+    Combine SBERT interaction features with graph features into a single matrix.
+    Layout: [|emb_q1-emb_q2| (384) | emb_q1*emb_q2 (384) | graph (6)] = (n, 774).
+    If sbert_feat_path exists the SBERT block is loaded from disk instead of
+    re-encoding, which saves time when train_models.ipynb has already run.
     """
     # --- Load or compute the SBERT block ------------------------------------
     if sbert_feat_path is not None and os.path.exists(sbert_feat_path):  

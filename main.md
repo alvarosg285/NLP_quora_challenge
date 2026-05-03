@@ -14,8 +14,9 @@ Dataset: [Quora Question Pairs — Kaggle](https://www.kaggle.com/c/quora-questi
 
 | Member | Responsibility |
 |--------|---------------|
-| Classmate | Baseline pipeline: `cast_list_as_strings`, `get_features_from_df`, `get_mistakes`, initial `train_models.ipynb` cells |
-| Student | All `# ADDED` functions in `utils.py`; extended `train_models.ipynb`; `reproduce_results.ipynb`; `utils_student.ipynb`; this document |
+| Álvaro Soto | Data loading, data analysis sections in `train_models.ipynb`; entire baseline pipeline: `cast_list_as_strings`, `get_interaction_features_from_df`, `get_mistakes`, `print_mistake_k`, CountVectorizer + TF-IDF fitting, `baseline_logistic` training |
+| Arnau Soler | Entire improved model: all handcrafted similarity features, SBERT embeddings (`get_sbert_interaction_features`), graph/magic features (`build_freq_dict`, `build_neighbor_dict`, `get_graph_features`, `get_sbert_graph_features`), `sbert_logistic` and `sbert_graph_logistic` training; `reproduce_results.ipynb`; `utils_Arnau_Soler.ipynb`; this document |
+| Malik Sattar | General contributions across the project |
 
 ---
 
@@ -26,54 +27,69 @@ Dataset: [Quora Question Pairs — Kaggle](https://www.kaggle.com/c/quora-questi
 | Component | Choice |
 |-----------|--------|
 | Tokenisation | Whitespace split, NaN → string `"nan"` |
-| Representation | `CountVectorizer` (unigrams), q1 and q2 concatenated |
+| Representation | `CountVectorizer` (unigrams): absolute difference \|X_q1 − X_q2\| and element-wise product X_q1 ⊙ X_q2 horizontally stacked |
 | Classifier | `LogisticRegression(solver="liblinear", random_state=123)` |
+
+Using interaction features (difference + product) instead of simple concatenation gives the linear model an explicit cross-question signal: the difference highlights words present in only one question, while the product highlights shared words.
 
 ### 3.2 Limitations of the Baseline
 
 - **No semantic similarity**: synonyms ("car" / "automobile") score zero overlap.
 - **Word order ignored**: BoW cannot distinguish "A beats B" from "B beats A".
-- **No cross-question signal**: the model never explicitly sees what q1 and q2 *share*.
-- **Stopword noise**: high-frequency words ("what", "is") carry as much weight as content words.
+- **Stopword noise**: high-frequency words ("what", "is") may carry too much weight.
 - **High dimensionality / sparsity**: >100 k features, most zero.
 
-### 3.3 Improved Model
+### 3.3 Improved Models
 
-We keep the BoW representation and add five handcrafted features that
-directly encode the *relationship* between q1 and q2.
+**Baseline + handcrafted features** — the BoW interaction features are extended with nine dense handcrafted signals that directly encode the relationship between q1 and q2.
 
-| # | Feature | Formula | Implementation |
-|---|---------|---------|---------------|
-| 0 | Jaccard similarity | $|A\cap B|/|A\cup B|$ | from scratch (Python sets) |
+| # | Feature | Description | Implementation |
+|---|---------|-------------|---------------|
+| 0 | Jaccard similarity | $\|A\cap B\|/\|A\cup B\|$ | from scratch (Python sets) |
 | 1 | Length ratio | $\min(l_1,l_2)/\max(l_1,l_2)$ | from scratch |
-| 2 | Common-word F1 | $2|A\cap B|/(|A|+|B|)$ | from scratch |
-| 3 | Char-bigram Dice coefficient | $2|bg_1\cap bg_2|/(|bg_1|+|bg_2|)$ | from scratch (`Counter`) |
-| 4 | TF-IDF cosine similarity | $\mathbf{u}\cdot\mathbf{v}/(||\mathbf{u}||\,||\mathbf{v}||)$ | from scratch (sparse ops) |
+| 2 | Common-word F1 | $2\|A\cap B\|/(\|A\|+\|B\|)$ | from scratch |
+| 3 | Char-bigram Dice | $2\|bg_1\cap bg_2\|/(\|bg_1\|+\|bg_2\|)$ | from scratch (`Counter`) |
+| 4 | Number mismatch | 1 if only one question contains a number | from scratch |
+| 5 | Exact number match | 1 if both contain numbers and they match | from scratch |
+| 6 | Uppercase match | 1 if both share the same mid-sentence capitalised words | from scratch |
+| 7 | First word match | 1 if both questions start with the same word | from scratch |
+| 8 | TF-IDF cosine | $\mathbf{u}\cdot\mathbf{v}/(\|\|\mathbf{u}\|\|\,\|\|\mathbf{v}\|\|)$ | from scratch (sparse ops) |
 
-A `TfidfVectorizer(ngram_range=(1,1), min_df=3, sublinear_tf=True)` is fitted
-on training questions only (no leakage) to supply the IDF weights for feature 4.
+A `TfidfVectorizer(ngram_range=(1,1), min_df=3, sublinear_tf=True)` is fitted on training data only (no leakage) to supply IDF weights for feature 8.
 
-The improved classifier is `LogisticRegression(solver="liblinear", random_state=123)`
-trained on the concatenation `[X_BoW | X_handcrafted]`.
+`lcs_ratio` (word-level Longest Common Subsequence, O(m·n) per pair) is implemented from scratch in `utils.py` and demonstrated in `utils_Arnau_Soler.ipynb`; it is not used in the full pipeline due to its cost.
 
-Additionally, `lcs_ratio` (word-level Longest Common Subsequence) is implemented
-from scratch in `utils.py` and demonstrated in `utils_student.ipynb`; due to its
-O(m·n) per-pair complexity it is not used in the full-dataset pipeline.
+**SBERT model** — each question is encoded independently with `paraphrase-MiniLM-L6-v2` (a Sentence-BERT model fine-tuned on paraphrase detection). The interaction features are \|emb_q1 − emb_q2\| concatenated with emb_q1 ⊙ emb_q2 (768 dimensions total), fed to a `LogisticRegression`.
+
+**SBERT + Graph model (best)** — the SBERT interaction features are extended with six graph-based features derived from the question-pair graph (each unique question is a node; each CSV row is an edge). The key insight from top Kaggle solutions is that questions sharing even one graph neighbour are far less likely to be duplicates.
+
+| Graph feature | Description |
+|---|---|
+| q1_freq, q2_freq | How often each question appears in training data |
+| freq_min, freq_max, freq_diff | Min, max, and absolute difference of the two frequencies |
+| intersect | Size of the common-neighbour set \|N(q1) ∩ N(q2)\| |
+
+The graph dictionaries (`freq_dict`, `neighbor_dict`) are built from training data only and applied read-only to val/test to avoid leakage.
 
 ---
 
 ## 4. Results
 
-*(Populated after running `reproduce_results.ipynb`)*
+*(Generated by running `reproduce_results.ipynb`)*
 
-| model | split | roc_auc | precision | recall | f1 |
-|-------|-------|---------|-----------|--------|----|
-| baseline | train | — | — | — | — |
-| baseline | val | — | — | — | — |
-| baseline | test | — | — | — | — |
-| improved | train | — | — | — | — |
-| improved | val | — | — | — | — |
-| improved | test | — | — | — | — |
+| model | split | roc_auc | precision | recall | f1 | accuracy |
+|-------|-------|---------|-----------|--------|----|----------|
+| baseline | train | 0.9419 | 0.8167 | 0.8324 | 0.8245 | 0.8694 |
+| baseline | val | 0.9007 | 0.7542 | 0.7662 | 0.7602 | 0.8216 |
+| baseline | test | 0.9061 | 0.7624 | 0.7638 | 0.7631 | 0.8238 |
+| sbert | train | 0.8988 | 0.7567 | 0.7430 | 0.7498 | 0.8172 |
+| sbert | val | 0.8939 | 0.7574 | 0.7277 | 0.7423 | 0.8136 |
+| sbert | test | 0.8983 | 0.7592 | 0.7353 | 0.7471 | 0.8151 |
+| sbert_graph | train | 0.9451 | 0.8457 | 0.7866 | 0.8151 | 0.8684 |
+| sbert_graph | val | 0.9448 | 0.8522 | 0.7752 | 0.8119 | 0.8675 |
+| sbert_graph | test | 0.9443 | 0.8499 | 0.7729 | 0.8096 | 0.8650 |
+
+The `sbert_graph` model achieves the best val/test ROC-AUC (0.9448 / 0.9443) with virtually no overfitting gap, confirming that graph features generalise well. The `baseline` model (BoW interactions + 9 handcrafted features) is competitive in F1 but its larger train/val gap reflects its higher-dimensional sparse representation. The standalone `sbert` model trails both, showing that semantic embeddings alone — without structural graph signal — are not sufficient.
 
 ---
 
@@ -81,17 +97,26 @@ O(m·n) per-pair complexity it is not used in the full-dataset pipeline.
 
 ```
 Name_Surname.zip
-├── main.pdf              ← this document
-├── environment.yml       ← conda environment (Python 3.9)
-├── utils.py              ← shared utility functions
-├── train_models.ipynb    ← trains and saves models to models/
-├── reproduce_results.ipynb ← loads models, evaluates, displays metrics
-├── utils_student.ipynb   ← explanation + demos of added utils functions
-└── models/               ← created by train_models.ipynb
+├── main.pdf                  ← this document
+├── environment.yml           ← conda environment (Python 3.9)
+├── utils.py                  ← shared utility functions
+├── train_models.ipynb        ← trains and saves models to models/
+├── reproduce_results.ipynb   ← loads models, evaluates, displays metrics
+├── utils_Arnau_Soler.ipynb   ← explanation + demos of Arnau's utils functions
+└── models/                   ← created by train_models.ipynb
     ├── count_vectorizer.pkl
     ├── tfidf_vectorizer.pkl
     ├── baseline_logistic.pkl
-    └── improved_logistic.pkl
+    ├── sbert_logistic.pkl
+    ├── sbert_graph_logistic.pkl
+    ├── freq_dict.pkl
+    ├── neighbor_dict.pkl
+    ├── sbert_X_train.npy
+    ├── sbert_X_val.npy
+    ├── sbert_X_test.npy
+    ├── sbert_graph_X_train.npy
+    ├── sbert_graph_X_val.npy
+    └── sbert_graph_X_test.npy
 ```
 
 > **Data path:** `~/Datasets/QuoraQuestionPairs/quora_data.csv`  
