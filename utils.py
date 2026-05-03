@@ -12,6 +12,25 @@ def cast_list_as_strings(mylist):
 
     return mylist_of_strings
 
+
+def get_features_from_df(df, count_vectorizer):
+    """
+    returns a sparse matrix containing the features built by the count vectorizer.
+    Each row should contain features from question1 and question2.
+    """
+    q1_casted =  cast_list_as_strings(list(df["question1"]))
+    q2_casted =  cast_list_as_strings(list(df["question2"]))
+    
+    ############### Begin exercise ###################
+    # what is kaggle                  q1
+    # What is the kaggle platform     q2
+    X_q1 = count_vectorizer.transform(q1_casted)
+    X_q2 = count_vectorizer.transform(q2_casted)    
+    X_q1q2 = scipy.sparse.hstack((X_q1,X_q2))
+    ############### End exercise ###################
+
+    return X_q1q2
+
 def get_interaction_features_from_df(df, count_vectorizer):
     """
     Returns a sparse matrix containing the interaction features built by the count vectorizer.
